@@ -1,0 +1,454 @@
+"""
+Booking.com Fixed Scraper - Extracts ALL Hotels Without Stale Element Issues
+Strategy: Store all hotel URLs first, then process them one by one
+"""
+
+import time
+import random
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from datetime import datetime, timedelta
+import traceback
+import re
+
+class BookingScraperFixed:
+    def __init__(self):
+        """Initialize scraper"""
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--window-size=1920,1080')
+        self.chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        self.tier1_cities = ['Mumbai', 'Delhi', 'Bangalore', 'Hyderabad', 'Chennai', 'Kolkata', 'Pune', 'Ahmedabad']
+        self.tier2_cities = ['Jaipur', 'Amritsar', 'Lucknow', 'Kochi', 'Nagpur', 'Agra', 'Chandigarh', 'Goa', 'Indore', 'Coimbatore', 'Visakhapatnam']
+        
+        self.all_hotels = []
+    
+    def create_search_url(self, city):
+        """Create search URL"""
+        checkin = datetime.now() + timedelta(days=30)
+        checkout = checkin + timedelta(days=2)
+        base_url = "https://www.booking.com/searchresults.html"
+        params = f"?ss={city}%2C+India&checkin={checkin.strftime('%Y-%m-%d')}&checkout={checkout.strftime('%Y-%m-%d')}&group_adults=2&no_rooms=1"
+        return base_url + params
+    
+    def collect_hotel_urls(self, driver, city, min_hotels=100, max_hotels=500):
+        """First pass: Collect all hotel URLs and basic data from listing pages"""
+        print(f"\n{'='*80}")
+        print(f"🏙️  COLLECTING HOTEL DATA: {city.upper()}")
+        print(f"{'='*80}")
+        
+        hotels_data = []
+        page = 1
+        max_pages = 20
+        
+        try:
+            url = self.create_search_url(city)
+            driver.get(url)
+            time.sleep(random.uniform(5, 7))
+            
+            # Close popups
+            try:
+                driver.find_element(By.CSS_SELECTOR, '[aria-label="Dismiss sign-in info."]').click()
+                time.sleep(1)
+            except:
+                pass
+            
+            while len(hotels_data) < max_hotels and page <= max_pages:
+                print(f"\n📄 Page {page} | Collected: {len(hotels_data)} hotels")
+                
+                # Scroll to load all content
+                for i in range(4):
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
+                
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(1)
+                
+                # Get all cards on this page
+                cards = driver.find_elements(By.CSS_SELECTOR, '[data-testid="property-card"]')
+                print(f"   Found {len(cards)} cards")
+                
+                if not cards:
+                    break
+                
+                # Extract data from EACH card on this page
+                page_hotels = []
+                for idx, card in enumerate(cards):
+                    if len(hotels_data) >= max_hotels:
+                        break
+                    
+                    try:
+                        hotel = {
+                            'hotel_name': '',
+                            'city': city,
+                            'price_per_night': '',
+                            'review_score': '',
+                            'number_of_reviews': '',
+                            'highlighted_review': '',
+                            'hotel_url': '',
+                            'popular_facilities': ''
+                        }
+                        
+                        # Name
+                        try:
+                            name = card.find_element(By.CSS_SELECTOR, '[data-testid="title"]')
+                            hotel['hotel_name'] = name.text.strip()
+                        except:
+                            continue
+                        
+                        # Price
+                        try:
+                            price = card.find_element(By.CSS_SELECTOR, '[data-testid="price-and-discounted-price"]')
+                            hotel['price_per_night'] = price.text.strip().replace('\n', ' ')
+                        except:
+                            pass
+                        
+                        # Review Score
+                        try:
+                            score = card.find_element(By.CSS_SELECTOR, 'div.dff2e52086')
+                            hotel['review_score'] = score.text.strip()
+                        except:
+                            pass
+                        
+                        # Number of Reviews
+                        try:
+                            rev = card.find_element(By.CSS_SELECTOR, 'div.eaa8455879')
+                            nums = re.findall(r'\d+', rev.text.replace(',', ''))
+                            if nums:
+                                hotel['number_of_reviews'] = nums[0]
+                        except:
+                            pass
+                        
+                        # Highlighted Review
+                        try:
+                            rev_text = card.find_element(By.CSS_SELECTOR, 'div.becbee2f63')
+                            hotel['highlighted_review'] = rev_text.text.strip()
+                        except:
+                            pass
+                        
+                        # Hotel URL (for facilities later)
+                        try:
+                            link = card.find_element(By.CSS_SELECTOR, '[data-testid="title-link"]')
+                            hotel['hotel_url'] = link.get_attribute('href')
+                        except:
+                            pass
+                        
+                        # Check duplicate
+                        if hotel['hotel_name']:
+                            is_dup = any(h['hotel_name'] == hotel['hotel_name'] for h in hotels_data)
+                            if not is_dup:
+                                page_hotels.append(hotel)
+                                hotels_data.append(hotel)
+                    
+                    except Exception as e:
+                        continue
+                
+                print(f"   ✓ Collected {len(page_hotels)} hotels from page {page}")
+                print(f"   📊 Total collected: {len(hotels_data)}")
+                
+                # Check if we have enough
+                if len(hotels_data) >= min_hotels:
+                    print(f"   ✅ Reached minimum target of {min_hotels}!")
+                    if len(hotels_data) >= max_hotels:
+                        break
+                
+                # Go to next page
+                try:
+                    next_btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label="Next page"]'))
+                    )
+                    driver.execute_script("arguments[0].click();", next_btn)
+                    page += 1
+                    time.sleep(random.uniform(3, 5))
+                except:
+                    print(f"   ⚠️  No more pages")
+                    break
+            
+            print(f"\n✅ Collection complete: {len(hotels_data)} hotels")
+            return hotels_data
+            
+        except Exception as e:
+            print(f"\n❌ Error collecting: {e}")
+            traceback.print_exc()
+            return hotels_data
+    
+    def extract_facilities(self, driver, hotel_url):
+        """Extract facilities from detail page"""
+        try:
+            driver.get(hotel_url)
+            time.sleep(random.uniform(2, 3))
+            
+            # Close popups
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, 'button[aria-label*="Dismiss"]')
+                for btn in btns[:2]:
+                    try:
+                        btn.click()
+                        time.sleep(0.3)
+                    except:
+                        pass
+            except:
+                pass
+            
+            facilities = []
+            
+            # Try multiple methods
+            try:
+                elems = driver.find_elements(By.CSS_SELECTOR, 'span.f6b6d2a959')
+                for elem in elems[:12]:
+                    txt = elem.text.strip()
+                    if txt and len(txt) < 60:
+                        facilities.append(txt)
+            except:
+                pass
+            
+            unique = list(dict.fromkeys(facilities))
+            return ', '.join(unique[:12])
+        except:
+            return ''
+    
+    def process_hotels_for_facilities(self, driver, hotels_data):
+        """Second pass: Visit each hotel's detail page to get facilities"""
+        print(f"\n{'='*80}")
+        print(f"🔍 EXTRACTING FACILITIES FROM {len(hotels_data)} HOTELS")
+        print(f"{'='*80}")
+        
+        for idx, hotel in enumerate(hotels_data, 1):
+            try:
+                print(f"\n[{idx}/{len(hotels_data)}] {hotel['hotel_name'][:40]}...")
+                
+                if hotel['hotel_url']:
+                    print(f"   📍 Visiting detail page...")
+                    facilities = self.extract_facilities(driver, hotel['hotel_url'])
+                    hotel['popular_facilities'] = facilities
+                    
+                    fac_count = len(facilities.split(',')) if facilities else 0
+                    print(f"   ✅ Facilities: {fac_count}")
+                else:
+                    print(f"   ⚠️  No URL available")
+                
+                time.sleep(random.uniform(1, 2))
+                
+            except Exception as e:
+                print(f"   ❌ Error: {str(e)[:40]}")
+                continue
+        
+        print(f"\n✅ Facilities extraction complete!")
+        return hotels_data
+    
+    def scrape_city(self, city, min_hotels=100, max_hotels=500):
+        """Scrape one city - two-pass approach"""
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=self.chrome_options)
+        
+        try:
+            # PASS 1: Collect all hotel data from listing pages
+            hotels_data = self.collect_hotel_urls(driver, city, min_hotels, max_hotels)
+            
+            if not hotels_data:
+                print(f"⚠️  No hotels collected for {city}")
+                return
+            
+            # PASS 2: Visit each hotel for facilities
+            hotels_data = self.process_hotels_for_facilities(driver, hotels_data)
+            
+            # Add to results
+            self.all_hotels.extend(hotels_data)
+            
+            print(f"\n{'='*80}")
+            print(f"✅ {city.upper()} COMPLETE: {len(hotels_data)} hotels")
+            print(f"{'='*80}")
+            
+        except Exception as e:
+            print(f"\n❌ Error in {city}: {e}")
+            traceback.print_exc()
+        finally:
+            driver.quit()
+            time.sleep(random.uniform(3, 5))
+    
+    def scrape_all_cities(self, min_hotels=100, max_hotels=500):
+        """Scrape all cities"""
+        print(f"\n{'='*80}")
+        print("🚀 STARTING TWO-PASS SCRAPER")
+        print(f"{'='*80}")
+        
+        all_cities = self.tier1_cities + self.tier2_cities
+        print(f"\n📍 Cities: {', '.join(all_cities)}")
+        print(f"🎯 Target: {min_hotels}-{max_hotels} per city")
+        print(f"\n💡 Strategy: Two-pass approach")
+        print(f"   Pass 1: Collect all data from listing pages")
+        print(f"   Pass 2: Visit detail pages for facilities")
+        print(f"{'='*80}\n")
+        
+        start = time.time()
+        
+        for idx, city in enumerate(all_cities, 1):
+            try:
+                print(f"\n{'#'*80}")
+                print(f"[{idx}/{len(all_cities)}] STARTING: {city.upper()}")
+                print(f"{'#'*80}")
+                self.scrape_city(city, min_hotels, max_hotels)
+            except Exception as e:
+                print(f"❌ Failed {city}: {e}")
+                continue
+        
+        elapsed = (time.time() - start) / 60
+        print(f"\n{'='*80}")
+        print(f"🎉 ALL CITIES COMPLETE!")
+        print(f"✓ Hotels: {len(self.all_hotels):,}")
+        print(f"✓ Time: {elapsed:.1f} min ({elapsed/60:.2f} hrs)")
+        print(f"{'='*80}\n")
+    
+    def save_to_excel(self, filename='booking_complete_data.xlsx'):
+        """Save to Excel"""
+        if not self.all_hotels:
+            print("❌ No data!")
+            return None
+        
+        print(f"\n💾 Saving {len(self.all_hotels):,} hotels...")
+        
+        df = pd.DataFrame(self.all_hotels)
+        
+        # Remove URL column (not needed in output)
+        cols = ['hotel_name', 'city', 'price_per_night', 'review_score', 
+                'number_of_reviews', 'highlighted_review', 'popular_facilities']
+        df = df[cols]
+        
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='All Hotels', index=False)
+            
+            tier1 = df[df['city'].isin(self.tier1_cities)]
+            tier2 = df[df['city'].isin(self.tier2_cities)]
+            
+            if not tier1.empty:
+                tier1.to_excel(writer, sheet_name='Tier 1', index=False)
+            if not tier2.empty:
+                tier2.to_excel(writer, sheet_name='Tier 2', index=False)
+            
+            for city in df['city'].unique():
+                city_df = df[df['city'] == city]
+                city_df.to_excel(writer, sheet_name=city[:31], index=False)
+        
+        print(f"✅ Saved: {filename}")
+        
+        # Stats
+        print(f"\n{'='*80}")
+        print("📊 FINAL REPORT")
+        print(f"{'='*80}\n")
+        
+        total = len(df)
+        print(f"Total Hotels: {total:,}\n")
+        
+        stats = {
+            'Hotel Name': len(df[df['hotel_name'] != '']),
+            'Price': len(df[df['price_per_night'] != '']),
+            'Review Score': len(df[df['review_score'] != '']),
+            'Num Reviews': len(df[df['number_of_reviews'] != '']),
+            'Highlighted Review': len(df[df['highlighted_review'] != '']),
+            'Facilities': len(df[df['popular_facilities'] != ''])
+        }
+        
+        for field, count in stats.items():
+            pct = (count/total*100) if total > 0 else 0
+            print(f"{field:<20}: {count:>6}/{total} ({pct:>5.1f}%)")
+        
+        print(f"\n{'City':<20} {'Hotels':<10} {'Avg Score'}")
+        print("-" * 50)
+        for city in sorted(df['city'].unique()):
+            city_df = df[df['city'] == city]
+            scores = [float(s) for s in city_df['review_score'] if s and s.replace('.','').isdigit()]
+            avg = f"{sum(scores)/len(scores):.1f}" if scores else "N/A"
+            print(f"{city:<20} {len(city_df):<10} {avg}")
+        
+        print(f"\n{'='*80}\n")
+        return df
+
+
+def main():
+    """Main"""
+    print("""
+    ╔════════════════════════════════════════════════════════════════╗
+    ║                                                                ║
+    ║   🏨 BOOKING.COM TWO-PASS SCRAPER (NO STALE ELEMENTS)          ║
+    ║                                                                ║
+    ║   Pass 1: Collect ALL data from listing pages                 ║
+    ║   Pass 2: Visit detail pages ONLY for facilities              ║
+    ║                                                                ║
+    ║   ✅ No stale element issues                                   ║
+    ║   ✅ Extracts ALL hotels found                                 ║
+    ║   ✅ Complete data with facilities                             ║
+    ║                                                                ║
+    ║   16 Cities | 100-500 hotels per city                          ║
+    ║                                                                ║
+    ╚════════════════════════════════════════════════════════════════╝
+    """)
+    
+    MIN = 300
+    MAX = 500
+    OUTPUT = 'booking_complete_hotels_data_final2.xlsx'
+    
+    print(f"⚙️  Configuration:")
+    print(f"   Min per city: {MIN}")
+    print(f"   Max per city: {MAX}")
+    print(f"   Output: {OUTPUT}")
+    print(f"\n⏰ Starting in 3 seconds...\n")
+    time.sleep(3)
+    
+    scraper = BookingScraperFixed()
+    scraper.scrape_all_cities(min_hotels=MIN, max_hotels=MAX)
+    
+    if scraper.all_hotels:
+        df = scraper.save_to_excel(OUTPUT)
+        if df is not None:
+            print(f"""
+    ✨ SUCCESS!
+    
+    📁 File: {OUTPUT}
+    📊 Hotels: {len(df):,}
+    🏙️  Cities: {df['city'].nunique()}
+            """)
+    else:
+        print("\n❌ No data scraped")
+
+
+if __name__ == "__main__":
+    print("🔍 Checking libraries...")
+    
+    required = {
+        'selenium': 'selenium',
+        'pandas': 'pandas',
+        'openpyxl': 'openpyxl',
+        'webdriver_manager': 'webdriver-manager'
+    }
+    
+    missing = []
+    for lib, pip in required.items():
+        try:
+            __import__(lib)
+        except ImportError:
+            missing.append(pip)
+    
+    if missing:
+        print(f"❌ Missing: {', '.join(missing)}")
+        print(f"Install: pip install {' '.join(missing)}")
+        exit(1)
+    
+    print("✅ Ready!\n")
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n⚠️  Stopped by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        traceback.print_exc()

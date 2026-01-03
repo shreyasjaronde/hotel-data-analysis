@@ -1,0 +1,170 @@
+import pandas as pd
+import numpy as np
+import re
+
+def clean_hotel_data(input_file, output_file='cleaned_hotel_data.xlsx'):
+    """
+    Comprehensive data cleaning and manipulation for hotel dataset
+    
+    Parameters:
+    input_file: path to input Excel file
+    output_file: path to save cleaned data
+    """
+
+    input_file = r'booking_complete_hotels_data_final2.xlsx'
+    
+    # Read the Excel file
+    print("Reading data...")
+    df = pd.read_excel(input_file)
+    
+    print(f"Original shape: {df.shape}")
+    print(f"Original columns: {df.columns.tolist()}\n")
+    
+    # 1. Clean column names - remove extra spaces and standardize
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    print(f"Cleaned column names: {df.columns.tolist()}\n")
+    
+    # 2. Remove completely empty rows
+    initial_rows = len(df)
+    df = df.dropna(how='all')
+    print(f"Removed {initial_rows - len(df)} completely empty rows\n")
+    
+    # 3. Clean price column (remove ₹ symbol and convert to numeric)
+    price_col = [col for col in df.columns if 'price' in col or 'per_night' in col]
+    if price_col:
+        price_col = price_col[0]
+        print(f"Cleaning price column: {price_col}")
+        df[price_col] = df[price_col].astype(str).str.replace('₹', '').str.replace(',', '').str.strip()
+        df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
+        print(f"Price column converted to numeric\n")
+    
+    # 4. Clean review_score column (ensure it's numeric)
+    score_col = [col for col in df.columns if 'score' in col or 'review' in col or 'rating' in col]
+    if score_col:
+        score_col = score_col[0]
+        print(f"Cleaning review score column: {score_col}")
+        df[score_col] = pd.to_numeric(df[score_col], errors='coerce')
+    
+    # 5. Clean number_of_reviews column
+    reviews_col = [col for col in df.columns if 'number' in col and 'review' in col]
+    if reviews_col:
+        reviews_col = reviews_col[0]
+        print(f"Cleaning number of reviews column: {reviews_col}")
+        df[reviews_col] = pd.to_numeric(df[reviews_col], errors='coerce')
+    
+    # 6. Standardize hotel names (remove extra spaces, title case)
+    if 'hotel_name' in df.columns:
+        df['hotel_name'] = df['hotel_name'].str.strip().str.title()
+    
+    # 7. Standardize city names
+    if 'city' in df.columns:
+        df['city'] = df['city'].str.strip().str.title()
+    
+    # 8. Clean and standardize highlighted_review column
+    if 'highlighted_review' in df.columns:
+        df['highlighted_review'] = df['highlighted_review'].str.strip()
+        # Standardize common values
+        review_mapping = {
+            'very good': 'Very Good',
+            'excellent': 'Excellent',
+            'good': 'Good',
+            'wonderful': 'Wonderful',
+            'superb': 'Superb',
+            'fabulous': 'Fabulous'
+        }
+        df['highlighted_review'] = df['highlighted_review'].str.lower().map(review_mapping).fillna(df['highlighted_review'])
+    
+    # 9. Clean facilities column
+    if 'regular_facilities' in df.columns:
+        df['regular_facilities'] = df['regular_facilities'].str.strip()
+        # Remove multiple spaces
+        df['regular_facilities'] = df['regular_facilities'].str.replace(r'\s+', ' ', regex=True)
+    
+    # 10. Handle missing values strategically
+    print("\nHandling missing values:")
+    
+    # For numeric columns, report missing values
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        missing_count = df[col].isna().sum()
+        if missing_count > 0:
+            print(f"  {col}: {missing_count} missing values")
+    
+    # Remove rows with missing critical information (hotel name or city)
+    critical_cols = ['hotel_name', 'city']
+    critical_cols = [col for col in critical_cols if col in df.columns]
+    df = df.dropna(subset=critical_cols)
+    
+    # 11. Remove duplicate hotels (based on hotel name and city)
+    if 'hotel_name' in df.columns and 'city' in df.columns:
+        initial_count = len(df)
+        df = df.drop_duplicates(subset=['hotel_name', 'city'], keep='first')
+        print(f"\nRemoved {initial_count - len(df)} duplicate hotels\n")
+    
+    # 12. Add derived columns
+    print("Adding derived columns:")
+    
+    # Price category
+    if price_col:
+        df['price_category'] = pd.cut(df[price_col], 
+                                      bins=[0, 10000, 20000, 35000, float('inf')],
+                                      labels=['Budget', 'Mid-Range', 'Upscale', 'Luxury'])
+        print("  Added 'price_category' column")
+    
+    # Rating category
+    if score_col:
+        df['rating_category'] = pd.cut(df[score_col],
+                                       bins=[0, 7.0, 8.0, 9.0, 10.0],
+                                       labels=['Average', 'Good', 'Very Good', 'Excellent'])
+        print("  Added 'rating_category' column")
+    
+    # Count facilities
+    if 'regular_facilities' in df.columns:
+        df['facilities_count'] = df['regular_facilities'].str.count(',') + 1
+        df.loc[df['regular_facilities'].isna(), 'facilities_count'] = 0
+        print("  Added 'facilities_count' column")
+    
+    # 13. Sort data by review score and price
+    sort_cols = []
+    if score_col:
+        sort_cols.append(score_col)
+    if price_col:
+        sort_cols.append(price_col)
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=[False, True])
+    
+    # 14. Reset index
+    df = df.reset_index(drop=True)
+    
+    # Print summary statistics
+    print("\n" + "="*60)
+    print("CLEANING SUMMARY")
+    print("="*60)
+    print(f"Final shape: {df.shape}")
+    print(f"\nMissing values per column:")
+    print(df.isna().sum()[df.isna().sum() > 0])
+    
+    if price_col:
+        print(f"\nPrice statistics:")
+        print(df[price_col].describe())
+    
+    if score_col:
+        print(f"\nReview score statistics:")
+        print(df[score_col].describe())
+    
+    # Save cleaned data
+    print(f"\nSaving cleaned data to {output_file}...")
+    df.to_excel(output_file, index=False)
+    print("Done!")
+    
+    return df
+
+# Usage example
+if __name__ == "__main__":
+    # Replace 'your_file.xlsx' with your actual file path
+    input_file = 'your_file.xlsx'
+    cleaned_df = clean_hotel_data(input_file, 'cleaned_hotel_data.xlsx')
+    
+    # Optional: Save as CSV as well
+    cleaned_df.to_csv('cleaned_hotel_data.csv', index=False)
+    print("\nAlso saved as CSV file")
